@@ -9,7 +9,7 @@ st.set_page_config(page_title="Custom YOLOv11 Detection", page_icon="🚀")
 st.title("Object Detection with Custom YOLO Model")
 
 # Sidebar for Model Selection
-model_path = 'weights/best.pt' # Path in your GitHub repo
+model_path = 'temp/best.pt' # Path in your GitHub repo
 confidence = st.sidebar.slider("Confidence", 0.0, 1.0, 0.5)
 
 # Load Model
