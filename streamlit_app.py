@@ -34,199 +34,283 @@
     # Display Result
     #st.image(res_plotted, caption="Detected Image", use_column_width=True)
 
-import glob
-import streamlit as st
-import wget
-from PIL import Image
-import torch
-import cv2
+
+# app_yolo11_streamlit.py
+# Streamlit web app: YOLO11 object detection on images and videos with confidence, class labels,
+# downloadable annotated outputs.
+# Author: Asim & M365 Copilot
+
+import io
 import os
-import time
+from pathlib import Path
+from typing import List, Dict
 
-st.set_page_config(layout="wide")
+import streamlit as st
+import numpy as np
+import pandas as pd
+from PIL import Image
+import cv2
 
-cfg_model_path = 'temp/best.pt'
-model = None
-confidence = .25
+# Ultralytics YOLO11
+from ultralytics import YOLO
+
+# ------------------------------
+# Utility functions
+# ------------------------------
+
+@st.cache_resource(show_spinner=False)
+def load_model(weights_path: str):
+    """Load YOLO model and cache it for reuse."""
+    model = YOLO(weights_path)
+    return model
 
 
-def image_input(data_src):
-    img_file = None
-    if data_src == 'Sample data':
-        # get all sample images
-        img_path = glob.glob('data/sample_images/*')
-        img_slider = st.slider("Select a test image.", min_value=1, max_value=len(img_path), step=1)
-        img_file = img_path[img_slider - 1]
+def draw_boxes(frame: np.ndarray, boxes, names: Dict[int, str], conf_thresh: float = 0.25) -> np.ndarray:
+    """Draw bounding boxes and labels on a frame using YOLO results."""
+    img = frame.copy()
+    if boxes is None:
+        return img
+
+    # Generate a color palette for classes
+    def get_color(idx: int):
+        np.random.seed(idx)
+        color = tuple(int(x) for x in np.random.randint(0, 255, size=3))
+        return color
+
+    for i in range(len(boxes)):
+        b = boxes[i]
+        conf = float(b.conf[0]) if hasattr(b, 'conf') else float(b.conf)
+        cls_idx = int(b.cls[0]) if hasattr(b, 'cls') else int(b.cls)
+        if conf < conf_thresh:
+            continue
+        x1, y1, x2, y2 = map(int, b.xyxy[0]) if hasattr(b, 'xyxy') else map(int, b.xyxy)
+        color = get_color(cls_idx)
+        label = f"{names.get(cls_idx, str(cls_idx))} {conf:.2f}"
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+        # Label background
+        (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.rectangle(img, (x1, y1 - th - baseline), (x1 + tw, y1), color, -1)
+        cv2.putText(img, label, (x1, y1 - baseline), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    return img
+
+
+def results_to_df(res, names: Dict[int, str]) -> pd.DataFrame:
+    """Convert YOLO prediction results to a tidy DataFrame."""
+    rows = []
+    boxes = res.boxes
+    if boxes is None:
+        return pd.DataFrame(columns=["class_id", "class_name", "confidence", "x1", "y1", "x2", "y2"])
+    for i in range(len(boxes)):
+        b = boxes[i]
+        cls_idx = int(b.cls[0]) if hasattr(b, 'cls') else int(b.cls)
+        conf = float(b.conf[0]) if hasattr(b, 'conf') else float(b.conf)
+        x1, y1, x2, y2 = map(float, b.xyxy[0]) if hasattr(b, 'xyxy') else map(float, b.xyxy)
+        rows.append({
+            "class_id": cls_idx,
+            "class_name": names.get(cls_idx, str(cls_idx)),
+            "confidence": conf,
+            "x1": x1,
+            "y1": y1,
+            "x2": x2,
+            "y2": y2,
+        })
+    df = pd.DataFrame(rows)
+    return df
+
+
+# ------------------------------
+# Streamlit UI
+# ------------------------------
+
+st.set_page_config(page_title="YOLO11 Object Detection", page_icon="🟡", layout="wide")
+st.title("🟡 YOLO11 Object Detection (Images & Videos)")
+
+st.sidebar.header("⚙️ Configuration")
+# Model selection
+model_choice = st.sidebar.selectbox(
+    "Choose YOLO11 model weights",
+    (
+        "yolo11n.pt",
+        "yolo11s.pt",
+        "yolo11m.pt",
+        "yolo11l.pt",
+        "yolo11x.pt",
+        "Upload custom .pt"
+    ),
+    index=0,
+)
+custom_model = None
+if model_choice == "Upload custom .pt":
+    custom_model = st.sidebar.file_uploader("Upload custom YOLO .pt weights", type=["pt"], accept_multiple_files=False)
+    if custom_model is not None:
+        # Save to a temporary path
+        temp_weights_path = Path(st.session_state.get("_temp_weights", "temp_model.pt"))
+        temp_weights_path.write_bytes(custom_model.read())
+        weights_path = str(temp_weights_path)
     else:
-        img_bytes = st.sidebar.file_uploader("Upload an image", type=['png', 'jpeg', 'jpg'])
-        if img_bytes:
-            img_file = "data/uploaded_data/upload." + img_bytes.name.split('.')[-1]
-            Image.open(img_bytes).save(img_file)
+        st.info("Upload a .pt file to proceed.")
+        st.stop()
+else:
+    weights_path = model_choice
 
-    if img_file:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(img_file, caption="Selected Image")
-        with col2:
-            img = infer_image(img_file)
-            st.image(img, caption="Model prediction")
+# Confidence & IoU thresholds
+conf_thresh = st.sidebar.slider("Confidence threshold", 0.0, 1.0, 0.25, 0.01)
+ious_thresh = st.sidebar.slider("IoU threshold (NMS)", 0.1, 1.0, 0.45, 0.01)
 
+# Load model
+with st.spinner("Loading YOLO11 model…"):
+    model = load_model(weights_path)
 
-def video_input(data_src):
-    vid_file = None
-    if data_src == 'Sample data':
-        vid_file = "data/sample_videos/sample.mp4"
-    else:
-        vid_bytes = st.sidebar.file_uploader("Upload a video", type=['mp4', 'mpv', 'avi'])
-        if vid_bytes:
-            vid_file = "data/uploaded_data/upload." + vid_bytes.name.split('.')[-1]
-            with open(vid_file, 'wb') as out:
-                out.write(vid_bytes.read())
+names = model.names if hasattr(model, 'names') else {i: str(i) for i in range(100)}
 
-    if vid_file:
-        cap = cv2.VideoCapture(vid_file)
-        custom_size = st.sidebar.checkbox("Custom frame size")
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        if custom_size:
-            width = st.sidebar.number_input("Width", min_value=120, step=20, value=width)
-            height = st.sidebar.number_input("Height", min_value=120, step=20, value=height)
+# Class filter
+all_classes = list(names.values())
+selected_classes = st.sidebar.multiselect("Filter classes (optional)", options=all_classes, default=[])
+selected_class_ids = [k for k, v in names.items() if v in selected_classes] if selected_classes else None
 
-        fps = 0
-        st1, st2, st3 = st.columns(3)
-        with st1:
-            st.markdown("## Height")
-            st1_text = st.markdown(f"{height}")
-        with st2:
-            st.markdown("## Width")
-            st2_text = st.markdown(f"{width}")
-        with st3:
-            st.markdown("## FPS")
-            st3_text = st.markdown(f"{fps}")
+# Processing options
+max_det = st.sidebar.number_input("Max detections per image/frame", min_value=10, max_value=1000, value=300, step=10)
+imgsz = st.sidebar.number_input("Image size (inference)", min_value=320, max_value=1280, value=640, step=64)
 
-        st.markdown("---")
-        output = st.empty()
-        prev_time = 0
-        curr_time = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                st.write("Can't read frame, stream ended? Exiting ....")
-                break
-            frame = cv2.resize(frame, (width, height))
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            output_img = infer_image(frame)
-            output.image(output_img)
-            curr_time = time.time()
-            fps = 1 / (curr_time - prev_time)
-            prev_time = curr_time
-            st1_text.markdown(f"**{height}**")
-            st2_text.markdown(f"**{width}**")
-            st3_text.markdown(f"**{fps:.2f}**")
+st.sidebar.markdown("---")
+st.sidebar.caption("Model and framework powered by Ultralytics YOLO11.")
 
-        cap.release()
+# Tabs for image and video
+tab_img, tab_vid = st.tabs(["🖼️ Image", "🎥 Video"])
 
+# ------------------------------
+# Image tab
+# ------------------------------
+with tab_img:
+    st.subheader("Image Inference")
+    img_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png", "bmp", "webp"])
+    cam_img = st.camera_input("Or capture from webcam (optional)")
 
-def infer_image(img, size=None):
-    model.conf = confidence
-    result = model(img, size=size) if size else model(img)
-    result.render()
-    image = Image.fromarray(result.ims[0])
-    return image
+    source_image = None
+    if img_file is not None:
+        source_image = Image.open(img_file).convert("RGB")
+    elif cam_img is not None:
+        source_image = Image.open(cam_img).convert("RGB")
 
+    if source_image is not None:
+        st.image(source_image, caption="Input image", use_column_width=True)
+        # Run inference
+        with st.spinner("Running detection…"):
+            res_list = model.predict(
+                source=np.array(source_image),
+                conf=conf_thresh,
+                iou=ious_thresh,
+                classes=selected_class_ids,
+                max_det=int(max_det),
+                imgsz=int(imgsz),
+                verbose=False,
+            )
+            res = res_list[0]
+            df = results_to_df(res, names)
 
-#@st.experimental_singleton
-#def load_model(path, device):
-   # model_ = torch.hub.load('ultralytics/yolov5', 'custom', path=path, force_reload=True)
-    #model_.to(device)
-   # print("model to ", device)
-    #return model_
+        # Annotate
+        annotated = draw_boxes(np.array(source_image), res.boxes, names, conf_thresh)
+        st.image(annotated, caption="Annotated image", use_column_width=True)
 
+        # Show table & stats
+        st.write("### Detections")
+        st.dataframe(df)
+        if not df.empty:
+            counts = df["class_name"].value_counts().rename_axis("class").reset_index(name="count")
+            st.write("### Class counts")
+            st.dataframe(counts)
 
-#@st.experimental_singleton
-#def download_model(url):
-    #model_file = wget.download(url, out="models")
-   # return model_file
+        # Download annotated image
+        annotated_pil = Image.fromarray(annotated)
+        buf = io.BytesIO()
+        annotated_pil.save(buf, format="PNG")
+        st.download_button(
+            label="⬇️ Download annotated image (PNG)",
+            data=buf.getvalue(),
+            file_name="annotated.png",
+            mime="image/png",
+        )
 
+# ------------------------------
+# Video tab
+# ------------------------------
+with tab_vid:
+    st.subheader("Video Inference")
+    video_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov", "mkv"])
+    frame_skip = st.number_input("Frame skip (process every Nth frame)", min_value=1, max_value=20, value=1)
 
-def get_user_model():
-    model_src = st.sidebar.radio("Model source", ["file upload", "url"])
-    model_file = None
-    if model_src == "file upload":
-        model_bytes = st.sidebar.file_uploader("Upload a model file", type=['pt'])
-        if model_bytes:
-            model_file = "models/uploaded_" + model_bytes.name
-            with open(model_file, 'wb') as out:
-                out.write(model_bytes.read())
-    else:
-        url = st.sidebar.text_input("model url")
-        if url:
-            model_file_ = download_model(url)
-            if model_file_.split(".")[-1] == "pt":
-                model_file = model_file_
+    if video_file is not None:
+        # Save uploaded video to a temp path
+        temp_video_path = Path("temp_input_video")
+        temp_video_path.write_bytes(video_file.read())
 
-    return model_file
-
-def main():
-    # global variables
-    global model, confidence, cfg_model_path
-
-    st.title("Object Recognition Dashboard")
-
-    st.sidebar.title("Settings")
-
-    # upload model
-    model_src = st.sidebar.radio("Select yolov5 weight file", ["Use our demo model 5s", "Use your own model"])
-    # URL, upload file (max 200 mb)
-    if model_src == "Use your own model":
-        user_model_path = get_user_model()
-        if user_model_path:
-            cfg_model_path = user_model_path
-
-        st.sidebar.text(cfg_model_path.split("/")[-1])
-        st.sidebar.markdown("---")
-
-    # check if model file is available
-    if not os.path.isfile(cfg_model_path):
-        st.warning("Model file not available!!!, please added to the model folder.", icon="⚠️")
-    else:
-        # device options
-        if torch.cuda.is_available():
-            device_option = st.sidebar.radio("Select Device", ['cpu', 'cuda'], disabled=False, index=0)
+        # Read video
+        cap = cv2.VideoCapture(str(temp_video_path))
+        if not cap.isOpened():
+            st.error("Failed to open video.")
         else:
-            device_option = st.sidebar.radio("Select Device", ['cpu', 'cuda'], disabled=True, index=0)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        # load model
-        #model = load_model(cfg_model_path, device_option)
+            # Output video writer
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            out_path = Path("annotated_output.mp4")
+            writer = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
 
-        # confidence slider
-        confidence = st.sidebar.slider('Confidence', min_value=0.1, max_value=1.0, value=.45)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            progress = st.progress(0.0, text="Processing video…")
 
-        # custom classes
-        if st.sidebar.checkbox("Custom Classes"):
-            model_names = list(model.names.values())
-            assigned_class = st.sidebar.multiselect("Select Classes", model_names, default=[model_names[0]])
-            classes = [model_names.index(name) for name in assigned_class]
-            model.classes = classes
-        else:
-            model.classes = list(model.names.keys())
+            processed = 0
+            frame_idx = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame_idx += 1
+                if frame_idx % int(frame_skip) != 0:
+                    continue
+                # Run inference per frame
+                res_list = model.predict(
+                    source=frame,
+                    conf=conf_thresh,
+                    iou=ious_thresh,
+                    classes=selected_class_ids,
+                    max_det=int(max_det),
+                    imgsz=int(imgsz),
+                    verbose=False,
+                )
+                res = res_list[0]
+                annotated_frame = draw_boxes(frame, res.boxes, names, conf_thresh)
+                writer.write(annotated_frame)
+                processed += 1
+                if total_frames:
+                    progress.progress(min((frame_idx / total_frames), 1.0), text=f"Processing frame {frame_idx}/{total_frames}")
 
-        st.sidebar.markdown("---")
+            cap.release()
+            writer.release()
+            st.success("Video processing complete.")
+            # Show preview of first frame from the output video
+            st.video(str(out_path))
+            # Provide download.
+            with open(out_path, "rb") as f:
+                st.download_button(
+                    label="⬇️ Download annotated video (MP4)",
+                    data=f.read(),
+                    file_name="annotated_output.mp4",
+                    mime="video/mp4",
+                )
 
-        # input options
-        input_option = st.sidebar.radio("Select input type: ", ['image', 'video'])
-
-        # input src option
-        data_src = st.sidebar.radio("Select input source: ", ['Sample data', 'Upload your own data'])
-
-        if input_option == 'image':
-            image_input(data_src)
-        else:
-            video_input(data_src)
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except SystemExit:
-        pass
+# ------------------------------
+# Footer
+# ------------------------------
+st.markdown(
+    """
+    ---
+    **Notes**:
+    - Confidence and class filters control which detections are rendered and listed.
+    - For large videos, increase *Frame skip* or reduce *Image size* for faster processing.
+    - If you upload custom weights, ensure they are compatible with Ultralytics YOLO11.
+    - This app uses the Ultralytics `YOLO` Python API. See documentation for details.
+    """
+)
