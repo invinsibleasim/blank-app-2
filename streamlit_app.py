@@ -62,7 +62,7 @@ from ultralytics import YOLO
 from pathlib import Path
 
 # Point this to your file; absolute paths are fine too
-weights_path = str(temp("best.pt").resolve())
+weights_path = "/full/path/to/best.pt"
 
 with st.spinner("Loading YOLO11 model…"):
     model = load_model(weights_path)
