@@ -58,6 +58,16 @@ from ultralytics import YOLO
 # Utility functions
 # ------------------------------
 
+# ---- Replace the sidebar selection with a fixed path to best.pt ----
+from pathlib import Path
+
+# Point this to your file; absolute paths are fine too
+weights_path = str(Path("best.pt").resolve())
+
+with st.spinner("Loading YOLO11 model…"):
+    model = load_model(weights_path)
+
+
 @st.cache_resource(show_spinner=False)
 def load_model(weights_path: str):
     """Load YOLO model and cache it for reuse."""
