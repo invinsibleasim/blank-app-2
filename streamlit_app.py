@@ -64,8 +64,8 @@ from pathlib import Path
 # Point this to your file; absolute paths are fine too
 weights_path = "temp/best.pt"
 
-with st.spinner("Loading YOLO11 model…"):
-    model = load_model(weights_path)
+#with st.spinner("Loading YOLO11 model…"):
+    #model = load_model(weights_path)
 
 
 @st.cache_resource(show_spinner=False)
