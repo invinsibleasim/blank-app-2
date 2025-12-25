@@ -1,4 +1,4 @@
-#ultralytics
+ultralytics
 #streamlit
 #opencv-python-headless
 #numpy
