@@ -5,6 +5,7 @@ pillow>=10.0.0
 pandas>=2.0.0
 numpy>=1.24.0
 opencv-python
+opencv-contrib-python==4.9.0.80
 #streamlit
 #opencv-python-headless
 #numpy
